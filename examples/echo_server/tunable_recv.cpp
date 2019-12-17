@@ -10,13 +10,25 @@
 #include <thread>
 #include <time.h>
 #include <unistd.h> //close()
+#include <websocketpp/config/asio_no_tls.hpp>
+#include <websocketpp/server.hpp>
+
+typedef websocketpp::server<websocketpp::config::asio> server;
+
+using websocketpp::lib::bind;
+using websocketpp::lib::placeholders::_1;
+using websocketpp::lib::placeholders::_2;
+
+// pull out the type of messages sent by our config
+typedef server::message_ptr message_ptr;
 
 using namespace std;
 
 mutex mtx;
-
+void echo_server();
 void udprecv(FILE *fp, const char *address, int port, int buffersize,
              int count);
+void on_message(server *s, websocketpp::connection_hdl hdl, message_ptr msg);
 
 int main(int argc, char **argv) {
   //引数を処理するための部分
@@ -60,6 +72,8 @@ int main(int argc, char **argv) {
   cout << "count: " << count << endl;
   struct timespec timeReg[2];
 
+  // Create a server endpoint
+
   FILE *fp;
   const char *filenamech = filename.c_str();
   fp = fopen(filenamech, "rb");
@@ -69,14 +83,16 @@ int main(int argc, char **argv) {
   vector<thread> threads;
   threads.reserve(num_thread);
   // スレッドを生成して実行開始
+  cout << "start threads (number: " << num_thread << ")" << endl;
 
-  for (size_t i = 0; i < num_thread; ++i) {
+  for (size_t i = 0; i < num_thread - 1; ++i) {
     if (protocol == "udp") {
       threads.emplace_back(
           thread(udprecv, fp, address, port, buffersize, count));
     }
   }
 
+  threads.emplace_back(thread(echo_server));
   for (auto &thread : threads) {
     thread.join();
   }
@@ -124,4 +140,55 @@ void udprecv(FILE *fp, const char *address, int port, int buffersize,
     // clock_nanosleep(CLOCK_REALTIME, 0, &waitTime, NULL);
   }
   close(sock_df);
+}
+
+// Define a callback to handle incoming messages
+void on_message(server *s, websocketpp::connection_hdl hdl, message_ptr msg) {
+  std::cout << "on_message called with hdl: " << hdl.lock().get()
+            << " and message: " << msg->get_payload() << std::endl;
+
+  // check for a special command to instruct the server to stop listening so
+  // it can be cleanly exited.
+  if (msg->get_payload() == "stop-listening") {
+    s->stop_listening();
+    return;
+  }
+
+  try {
+    // s->send(hdl, msg->get_payload(), msg->get_opcode());
+    s->send(hdl, "msg->get_payload()", msg->get_opcode());
+  } catch (websocketpp::exception const &e) {
+    std::cout << "Echo failed because: "
+              << "(" << e.what() << ")" << std::endl;
+  }
+}
+
+void echo_server() {
+  server echo_server;
+
+  try {
+    // Set logging settings
+    echo_server.set_access_channels(websocketpp::log::alevel::all);
+    echo_server.clear_access_channels(websocketpp::log::alevel::frame_payload);
+
+    // Initialize Asio
+    echo_server.init_asio();
+
+    // Register our message handler
+    echo_server.set_message_handler(
+        bind(&on_message, &echo_server, ::_1, ::_2));
+
+    // Listen on port 9002
+    echo_server.listen(9002);
+
+    // Start the server accept loop
+    echo_server.start_accept();
+
+    // Start the ASIO io_service run loop
+    echo_server.run();
+  } catch (websocketpp::exception const &e) {
+    std::cout << e.what() << std::endl;
+  } catch (...) {
+    std::cout << "other exception" << std::endl;
+  }
 }
