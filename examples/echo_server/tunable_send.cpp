@@ -15,7 +15,9 @@ using namespace std;
 
 mutex mtx;
 
-void udprecv(FILE *fp, const char *address, int port, int buffersize,
+void tcpsend(FILE *fp, const char *address, int port, int buffersize,
+             int count);
+void udpsend(FILE *fp, const char *address, int port, int buffersize,
              int count);
 
 int main(int argc, char **argv) {
@@ -59,7 +61,8 @@ int main(int argc, char **argv) {
   cout << "buffer size: " << buffersize << endl;
   cout << "count: " << count << endl;
   struct timespec timeReg[2];
-
+  cout << "size of timespec" << sizeof(struct timespec) << endl;
+  cout << "size of int" << sizeof(int) << endl;
   FILE *fp;
   const char *filenamech = filename.c_str();
   fp = fopen(filenamech, "rb");
@@ -73,7 +76,10 @@ int main(int argc, char **argv) {
   for (size_t i = 0; i < num_thread; ++i) {
     if (protocol == "udp") {
       threads.emplace_back(
-          thread(udprecv, fp, address, port, buffersize, count));
+          thread(udpsend, fp, address, port, buffersize, count));
+    } else {
+      threads.emplace_back(
+          thread(tcpsend, fp, address, port, buffersize, count));
     }
   }
 
@@ -90,7 +96,43 @@ int main(int argc, char **argv) {
   return 0;
 }
 
-void udprecv(FILE *fp, const char *address, int port, int buffersize,
+void tcpsend(FILE *fp, const char *address, int port, int buffersize,
+             int count) {
+
+  // struct timespec waitTime;
+  // waitTime.tv_sec = 0;
+  // waitTime.tv_nsec = 1e8;
+
+  struct sockaddr_in addr;
+  addr.sin_family = AF_INET;                 // IPv4を指定
+  addr.sin_port = htons(port);               //ポート番号
+  addr.sin_addr.s_addr = inet_addr(address); //サーバー側のアドレス
+  ssize_t send_status;
+  char rebuf[buffersize];
+  for (int c_i = 0; c_i < count; c_i++) {
+    int sock_df;
+    mtx.lock();
+    size_t fr_err = fread(rebuf, 1, buffersize, fp);
+    mtx.unlock();
+    if (fr_err < 0) {
+      perror("file read error");
+    }
+    sock_df = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock_df < 0) {
+      perror("Couldn't make a socket");
+    }
+    if (connect(sock_df, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+      perror("connect error");
+    }
+    send_status = write(sock_df, rebuf, buffersize);
+    if (send_status < 0) {
+      perror("send error");
+    }
+    // clock_nanosleep(CLOCK_REALTIME, 0, &waitTime, NULL);
+    close(sock_df);
+  }
+}
+void udpsend(FILE *fp, const char *address, int port, int buffersize,
              int count) {
 
   // struct timespec waitTime;
@@ -105,22 +147,24 @@ void udprecv(FILE *fp, const char *address, int port, int buffersize,
   addr.sin_family = AF_INET;                 // IPv4を指定
   addr.sin_port = htons(port);               //ポート番号
   addr.sin_addr.s_addr = inet_addr(address); //サーバー側のアドレス
+  ssize_t send_status;
   char rebuf[buffersize];
-  bind(sock_df, (struct sockaddr *)&addr, sizeof(addr));
   for (int c_i = 0; c_i < count; c_i++) {
-    // mtx.lock();
-    // fread(rebuf, 1, buffersize, fp);
-    // mtx.unlock();
-    memset(rebuf, 0, sizeof(rebuf));
-    int recnum = recv(sock_df, rebuf, sizeof(rebuf), 0);
-    if (recnum < 0) {
-      perror("recv error");
-    } else {
-      cout << c_i << ":" << recnum << "\t";
+    mtx.lock();
+    size_t fr_err = fread((rebuf + 20), 1, buffersize - 20,
+                          fp); // sizeof int=4, sizeof struct timespec 16
+    if (fr_err < 0) {
+      perror("file read error");
     }
-    struct timespec *ti = (struct timespec *)(rebuf + 4);
-    cout << (*ti).tv_sec << " " << (*ti).tv_nsec << "\t";
-    cout << *((int *)rebuf) << endl;
+    mtx.unlock();
+    *((int *)rebuf) = c_i;
+    char *timespec_start = rebuf + 4;
+    clock_gettime(CLOCK_REALTIME, (struct timespec *)timespec_start);
+    send_status = sendto(sock_df, rebuf, buffersize, 0,
+                         (struct sockaddr *)&addr, sizeof(addr));
+    if (send_status < 0) {
+      perror("send error");
+    }
     // clock_nanosleep(CLOCK_REALTIME, 0, &waitTime, NULL);
   }
   close(sock_df);
